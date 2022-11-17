@@ -1,13 +1,20 @@
 #BINF6210 Assignment 2---- 
+
 #Name: Kasra Foroughi
 #Student ID: 1111472
-#October 28, 20229
+
+#Collaborator name: Omar Amin
+#Student ID: 1251813
+
+#November 17, 20229
+
 
 #Part 1: Loading Packages----
 #install.packages('tidyverse')
 library(tidyverse)
 library(ggplot2)
 library(cluster)
+library(grid)
 
 #install.packages("BiocManager")
 #library(BiocManager)
@@ -28,8 +35,12 @@ library(ape)
 #install.packages("RSQLite") #a required package for DECIPHER
 library(RSQLite)
 
-#install.packages("factoextra")
 library(factoextra)
+
+#install.packages('dendextend')
+library(dendextend) 
+
+
 #Part 2: Load Data sets----
 #Step 1 Load Nuccore database of Rattus Genus for Genes COI & CYTB for analysis
 
@@ -107,11 +118,30 @@ nrow(Rattus_DF_COI_Raw) - nrow(Rattus_DF_COI)
 #new summary and histogram to check if outliers are removed
 summary(nchar(Rattus_DF_COI$COI_Sequence))
 
+#EDIT 1: Just edit the boxplot
 #Create a box plot to visualize the spread of the COI Sequence lengths
 COI_His <- nchar(Rattus_DF_COI$COI_Sequence)
-boxplot(COI_His, horizontal =TRUE,
-        main = 'Distribution of COI Sequence Lengths',
-        xlab = "Length of COI Sequence (Bp)")
+
+#####################my edit######################
+COI_df <- as.data.frame(COI_His)
+
+findoutlier <- function(x) {
+  return(x < quantile(x, .25) - 1.5*IQR(x) | x > quantile(x, .75) + 1.5*IQR(x))
+}
+
+df <- COI_df %>%
+  mutate(outlier = ifelse(findoutlier(COI_His), COI_His, NA))
+
+
+
+ggplot(data.frame(df), aes(x="", y = COI_His)) +
+  geom_boxplot() +
+  geom_text(aes(label=outlier), na.rm=TRUE, hjust=-.5)
+
+#################################################
+#boxplot(COI_His, horizontal =TRUE,
+#        main = 'Distribution of COI Sequence Lengths',
+#        xlab = "Length of COI Sequence (Bp)")
 
 #For Cyt B gene, the common BP length is 1140, however, there is higher variance within the range, thus I have chose to use
 #data points that are within 500+/- BP 
@@ -137,94 +167,54 @@ boxplot(CYTB_His, horizontal =TRUE,
 #This section will involve alignment of the respective genes 
 #The basis is to first align each sequence grouped by species name, create a consensus sequence for each species name before an alignment
 
-#Create a list of Dataframes which are separated by Species Name
-#COI Section
-Rattus_COI_DF_List <- split(Rattus_DF_COI, f = Rattus_DF_COI$Species_Name)
+############################## Omar's EDIT (1 & 2) ##############################
+#Edit 1
+#In part 4 of Kasra's code, he performs a very smart method of separating the large df into a list of dfs, each df has the sequences of a specific  species in the group, and then he does a function that generates a consensus sequence after alignment in each species, after this function is done, he performs two lapply functions on the list of dfs, he changes the DNAStringSet character and then unlists all the dfs into a single df (containing al the species' consensus sequence). then, he converts the rownames into a single column and he changes the column names as "Species_Name" and "Consensus_COI_Sequence". 
+#I think it might be more efficient to do all these steps inside one function, the input for the function will be the large df without splitting it into a list of dfs, thus making it more efficient and easier to use with fewer lines and it is reproducible with any data frame that has many species with many sequences if we want to use this function for future projects.
+#Also, he created two functions for both COI & CYTB, because they have a different column name for the sequence (COI_Sequence, CYTB_Sequence), I think it will be more efficient to use one function that takes the name of the sequence column of any input df and deals with it throughout the function (as long as the column containing the sequences is in the third column).
 
-#COI function
-#CONS DF
-#this function takes in a dataframe of COI sequences
-#It cleans the data, performs an alignment and then returns a consensus alignment.
-cons_df <- function(df){
-  #Determine the percentage (1%) allowed for missing variables within the gene
+#Edit 2
+#Inside the function, there was a filtering process in which it removes the N if it passes 1 percent of sequence, I added a very basic regular expression inside (pattern = [^ATCG]) that looks for anything other than the ATGC nucleotides, while also keeping the 1 percent threshold.
+
+omar_cons_func <- function(df){
   missing.data <- 0.01
-  #Sequence length variability of 50 nucleotides
   length.var <- 50
-    df1 <- df
-  #This section filters out the data
-  #It first creates a new column known as nucleotides2 which removes the terminal N's and gaps in each sequence 
-  #It then filters out any sequences which have more than 1% missing data = dont want too many missing sequences
-  #It then filters out sequences which are outside the range of the median sequence length in accordance to length.var
-  df1 <-df1 %>%
-    mutate(nucleotides2 = str_remove_all(df1$COI_Sequence, "^N+|N+$|-")) %>%
-    filter(str_count(nucleotides2, "N") <= (missing.data * str_count(df1$COI_Sequence))) %>%
-    filter(str_count(nucleotides2) >= median(str_count(nucleotides2)) - length.var & str_count(nucleotides2) <= median(str_count(nucleotides2)) + length.var)
-  #Change the nucleotides2 format into DNAStringSet to be used by the Bioconductor class for alignment
-  #Assigning a unique Identifier for each of the sequences that have been converted 
-  df1$nucleotides2 <- DNAStringSet(df1$nucleotides2)
-  names(df1$nucleotides2) <- df1$Species_Name
-  
-  #Use Muscle alignment to align sequences 
-  testCOI_alignment <- DNAStringSet(muscle::muscle(df1$nucleotides2))
-  #use ConsensusSequence to create a consensus sequence of the aligned sequence which will later be used for clustering
-  cons <- ConsensusSequence(testCOI_alignment)
-  return(cons)
-}
+  seq_col_name <- paste0("Consensus_", colnames(df)[3])
+  df_final <- lapply(split(df, f = df$Species_Name), function(df1){
+    df1 <-df1 %>%
+      mutate(nucleotides2 = str_remove_all(df1[,3], "^N+|N+$|-")) %>%
+      filter(str_count(nucleotides2, "[^ATCG]") <= (missing.data * str_count(df1[,3]))) %>%
+      filter(str_count(nucleotides2) >= median(str_count(nucleotides2)) - length.var & str_count(nucleotides2) <= median(str_count(nucleotides2)) + length.var)
+    df1$nucleotides2 <- DNAStringSet(df1$nucleotides2)
+    names(df1$nucleotides2) <- df1$Species_Name
+    testCOI_alignment <- DNAStringSet(muscle::muscle(df1$nucleotides2))
+    cons <- as.character(ConsensusSequence(testCOI_alignment))})
+  df_final <- as.data.frame(unlist(df_final)) %>% 
+    tibble::rownames_to_column("Species_Name") %>%
+    `colnames<-`(c("Species_Name", seq_col_name))
+  return(df_final)}
 
-#This section involves applying the cons_df on every dataframe which was split prior - thus each species will get a consensus sequence returned
-temp_COI_list <- lapply(Rattus_COI_DF_List, cons_df)
-#Have to convert the valus to as.character from DNAStringSet
-temp_COI_list_2 <- lapply(temp_COI_list, as.character)
-#Have to unlist the list of dataframes to a single dataframe which inclueds the Species name and their resepctive consensus sequence
-temp_COI_list_3 <- as.data.frame(unlist(temp_COI_list_2))
-COI_seq <- tibble::rownames_to_column(temp_COI_list_3, "Species_Name")
-colnames(COI_seq)[2] <- "Consensus_COI_Sequence"
-#view(COI_seq)
+#And just like that, we use the function on the two large dfs 
+COI_seq <- omar_cons_func(Rattus_DF_COI)
+CYTB_seq <- omar_cons_func(Rattus_DF_CYTB)
+
+####################################End of Edit 1 & 2 #####################################
 
 #Alignment of Consensus Sequences of COI
 #First create another column known as nucleotides 2 and convert it to a DNAStringSet for Bioconductor alignment
-COI_All <- COI_seq %>% 
-  mutate(nucleotides2 = Consensus_COI_Sequence)
+COI_All <- COI_seq %>% mutate(nucleotides2 = Consensus_COI_Sequence)
 COI_All$nucleotides2 <- DNAStringSet(COI_All$nucleotides2)
 names(COI_All$nucleotides2) <- COI_All$Species_Name
 #Align all consensus sequence based on Muscle Alignment
 COI_alignment <- DNAStringSet(muscle::muscle(COI_All$nucleotides2))
 
-#CYTB Section
-#THe process was repeated exactly the same for CYTB gene, refer to COI section for commenting 
-Rattus_CYTB_DF_List <- split(Rattus_DF_CYTB, f = Rattus_DF_CYTB$Species_Name)
-
-#CYTB function
-cytb_df <- function(df){
-  missing.data <- 0.01
-  length.var <- 50
-  df1 <- df
-  df1 <-df1 %>%
-    mutate(nucleotides2 = str_remove_all(df1$CYTB_Sequence, "^N+|N+$|-")) %>%
-    filter(str_count(nucleotides2, "N") <= (missing.data * str_count(df1$CYTB_Sequence))) %>%
-    filter(str_count(nucleotides2) >= median(str_count(nucleotides2)) - length.var & str_count(nucleotides2) <= median(str_count(nucleotides2)) + length.var)
-  
-  df1$nucleotides2 <- DNAStringSet(df1$nucleotides2)
-  names(df1$nucleotides2) <- df1$Species_Name
-
-  testCOI_alignment <- DNAStringSet(muscle::muscle(df1$nucleotides2))
-  cons <- ConsensusSequence(testCOI_alignment)
-  return(cons)
-}
-
-temp_CYTB_list <- lapply(Rattus_CYTB_DF_List, cytb_df)
-temp_CYTB_list_2 <- lapply(temp_CYTB_list, as.character)
-temp_CYTB_list_3 <- as.data.frame(unlist(temp_CYTB_list_2))
-CYTB_seq <- tibble::rownames_to_column(temp_CYTB_list_3, "Species_Name")
-colnames(CYTB_seq)[2] <- "Consensus_CYTB_Sequence"
-#view(COI_seq)
-
-CYTB_All <- CYTB_seq %>% 
-  mutate(nucleotides2 = Consensus_CYTB_Sequence)
+#Alignment of Consensus Sequences of CYTB
+CYTB_All <- CYTB_seq %>% mutate(nucleotides2 = Consensus_CYTB_Sequence)
 CYTB_All$nucleotides2 <- DNAStringSet(CYTB_All$nucleotides2)
 names(CYTB_All$nucleotides2) <- CYTB_All$Species_Name
 CYTB_alignment <- DNAStringSet(muscle::muscle(CYTB_All$nucleotides2))
 #BrowseSeqs(COI_alignment)
+
 
 #Part 5: Clustering & Silhouette---- 
 #Before clustering, we need to create a distance Matrix for hierarchical clustering
@@ -289,3 +279,24 @@ hc_cut_CYTB <- hcut(distanceMatrix_CYTB, k = 3, hc_method = "ward.D2")
 # Visualize silhouhette information
 fviz_silhouette(hc_cut_CYTB, main = "CYTB Silhouette")
 
+#######################################Omar Edit 3########################################
+#In Kasra's code above, he used the silhouette index to determine which clustering method of CYTB and COI is the best based on the silhouette width
+#In my edit, I wanted to compare the two clusters facing each other using a tanglegram, this method aligns the two clusters together while untangling the dendrograms (while maintaining the structure of the dendrograms accurately). I used the step2side method for untangling as it showed the most efficient untangling. The results were very promising and agrees with Kasra's discussion and conclusion. The figure shows only 3 terminal nodes aligning between both genes (Rattus tiomanicus - Rattus rattus), (Rattus brunneusculus, Rattus andamanensis) and (Rattus norvegicus - Rattus nitidus), and no larger clades aligned between both genes.
+COI_dend <- as.dendrogram (COI_Cluster)
+CYTB_dend <- as.dendrogram(CYTB_Cluster)
+
+# Create a list to hold dendrograms
+cluster_dend <- dendlist(COI_dend, CYTB_dend) %>%
+  untangle() %>%
+  set("rank_branches") %>%
+  tanglegram(margin_inner=5)
+
+pdf("trial.pdf")
+dendlist(COI_dend, CYTB_dend) %>%
+  untangle(method="step2side") %>%
+  set("rank_branches") %>%
+  tanglegram(margin_inner=9)
+grid.text("COI vs CYTB Clusters", x = (0.5), y = (0.95))
+
+dev.off()
+#######################################Edit End#####################################
